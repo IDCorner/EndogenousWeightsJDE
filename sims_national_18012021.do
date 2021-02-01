@@ -1,0 +1,352 @@
+clear all
+set maxvar 120000 
+set matsize 11000 
+global path "/Users/ricardonogales/Dropbox/Endogenous Weights/Datasets and dofiles/"
+
+* Dataset Creation
+
+local cutoff 50 // Select the cutoff for which one wants to create the datset
+gen a=""
+save "$path/temp_k`cutoff'",replace
+label def method 1 "Exogenous" 2 "Frequency" 3 "PCA"
+foreach x of numlist 1/10 {
+	set seed 12`x'
+	foreach j of numlist 1/6 {
+		local c`j'=runiform(0.2,0.8)
+	}
+	local m=runiform(0.4,0.5)
+	local m1=0.5*`m'
+	local m2=`m'
+	local m3=1.5*`m'
+	local m4=2*`m'
+	matrix C = (1, `c1', `c2', `c3' \ ///
+				`c1', 1, `c4', `c5' \ ///
+				`c2', `c4', 1, `c6' \ ///
+				`c3', `c5', `c6', 1)	
+
+	*corr2data i1 i2 i3 i4, n(1000) corr(C) mean(`m1' `m2' `m3' `m4')
+	drawnorm i1 i2 i3 i4, n(1000) corr(C) mean(`m1' `m2' `m3' `m4')
+	sum i*
+
+	foreach i of numlist 1/4 {
+		gen c_i`i'=normal(i`i')
+		replace i`i'=(i`i'>=0.5)
+		label var i`i' "Indicator `i'"
+	}
+
+	** Baseline poverty measures
+		* Exogenous weights
+		foreach i of numlist 1/4 {
+			gen exo_w`i'=1/4
+		}
+
+		* Freq weights
+		mean i*
+		mat E=e(b)
+		local sum=0
+		foreach i of numlist 1/4 {
+			local sum=`sum'-ln(E[1,`i'])
+		}
+		foreach i of numlist 1/4 {
+			gen freq_w`i'=-ln(E[1,`i'])/`sum'
+		}
+
+		* PCA weights
+		tetrachoric i*, star(0.05)
+		mat C=r(corr)
+		local n=_N
+		pcamat C, n(`n') factor(1) forcepsd // we retain only the first principal component
+		estat loadings
+		mat S1=r(A) // Original loadings = non-normalized weights
+		local sum=0
+		foreach i of numlist 1/4 {
+			local sum=`sum'+S1[`i',1] // Sum of non-normalized weights
+		}
+		foreach i of numlist 1/4 {
+			gen pca_w`i'=S1[`i',1]/`sum' 
+		}
+
+		* c scores
+		foreach w in exo freq pca {
+			foreach i of numlist 1/4 {
+				gen g0_`i'_`w'=i`i'*`w'_w`i'
+			}
+			egen c_`w'=rowtotal(g0*`w')
+		}
+
+		* individual poverty status
+		foreach k of local cutoff {
+			foreach w in exo freq pca {
+				gen poor_`w'_`k'=(c_`w'>=`k'/100)
+			}
+
+			* intensity among the poor
+			foreach w in exo freq pca {
+				gen cens_c_`w'_`k'=c_`w'
+				replace cens_c_`w'_`k'=0 if poor_`w'_`k'==0
+			}
+		}
+		
+		* Initialize matrix to store results
+		mat R=J(1,6,.)
+		mat colnames R=sim_port sim_ind k w_method mpi rep
+
+		* adjusted poverty headcount ratio = the societal poverty measure of interest
+		foreach k of local cutoff {
+			local j=0
+			foreach w in exo freq pca {
+				local j=`j'+1
+				sum cens_c_`w'_`k'
+				mat B=(0,.,`k',`j',r(mean),0) // last zero is for repetion 
+				mat R=R\B
+			}
+		}
+}
+e
+		
+	** Simulated poverty measures, with synthetic deprivations affecting different proportions of the population
+		local rep 10 // number of repetitions for simulation
+		local sim 1 2 3 4 // simulated list of indicators
+		
+		* Clone variables
+		foreach i of numlist 1/4 {
+			foreach s of local sim { // simulated indicator
+				foreach r of numlist 1/`=`rep'' { // number of replications in simulation
+					foreach p of numlist 1/19 { // simulated proportion of additional indicators
+						clonevar i`i'_s`s'_p`p'_r`r'=i`i' // variables are identical at first
+					}
+				}
+			}
+		}
+
+	* Creation of added deprivations
+		foreach s of local sim { // simulated indicator
+			foreach r of numlist 1/`=`rep'' { // number of replications in simulation
+				set seed `r'
+				gen u_`r'=runiform() if i`s'==0 // random indentifier
+				xtile pct_`r' = u_`r', nq(20) // steps of 5%
+				foreach p of numlist 1/19 {
+					replace i`s'_s`s'_p`p'_r`r'=1 if pct_`r'<=`p'
+				}
+				drop u_`r' pct_`r'
+			}
+		}
+		
+	* Recalculation of MPIs
+		* Exogenous weights // Do not change
+		foreach i of numlist 1/4 {
+			foreach s of local sim { // simulated indicator
+				foreach r of numlist 1/`=`rep'' { // number of replications in simulation
+					foreach p of numlist 1/19 { // simulated proportion of additional indicators
+						clonevar exo_w`i'_s`s'_p`p'_r`r'=exo_w`i' // variables are identical at first
+					}
+				}
+			}
+		}
+		
+		
+		* Freq weights
+		foreach s of local sim { // simulated indicator
+			foreach p of numlist 1/19 {
+				foreach r of numlist 1/`=`rep'' {
+					mean i*s`s'_p`p'_r`r'
+					mat E=e(b)
+					local sum=0
+					foreach i of numlist 1/4 {
+						local sum=`sum'-ln(E[1,`i'])
+					}
+					foreach i of numlist 1/4 {
+						gen freq_w`i'_s`s'_p`p'_r`r'=-ln(E[1,`i'])/`sum'
+					}
+				}
+			}
+		}
+		
+		* PCA weights
+		foreach s of local sim { // simulated indicator
+			foreach p of numlist 1/19 {
+				foreach r of numlist 1/`=`rep'' {	
+					tetrachoric i*_s`s'_p`p'_r`r'
+					mat C=r(corr)
+					local n=_N
+					pcamat C, n(`n') factor(1) forcepsd // we retain only the first principal component
+					estat loadings
+					mat S1=r(A) // Original loadings = non-normalized weights
+					local sum=0
+					foreach i of numlist 1/4 {
+						local sum=`sum'+S1[`i',1] // Sum of non-normalized weights
+					}
+					foreach i of numlist 1/4 {
+						gen pca_w`i'_s`s'_p`p'_r`r'=S1[`i',1]/`sum' 
+					}
+				}
+			}
+		}
+		
+		* c scores
+		foreach w in exo freq pca {
+			foreach s of local sim { // simulated indicator
+				foreach p of numlist 1/19 {
+					foreach r of numlist 1/`=`rep'' {
+						foreach i of numlist 1/4 {
+							gen g0_`i'_`w'_s`s'_p`p'_r`r'=i`i'_s`s'_p`p'_r`r'*`w'_w`i'_s`s'_p`p'_r`r'
+						}
+						egen c_`w'_s`s'_p`p'_r`r'=rowtotal(g0*`w'_s`s'_p`p'_r`r')
+					}
+				}
+			}
+		}
+
+		* individual poverty status
+		foreach k of local cutoff {
+			foreach w in exo freq pca {
+				foreach s of local sim { // simulated indicator
+					foreach p of numlist 1/19 {
+						foreach r of numlist 1/`=`rep'' {
+							gen poor_`w'_`k'_s`s'_p`p'_r`r'=(c_`w'_s`s'_p`p'_r`r'>=`k'/100)
+						}
+					}
+				}
+			}
+		}
+
+		* intensity among the poor
+		foreach k of local cutoff {
+			foreach w in exo freq pca {
+				foreach s of local sim { // simulated indicator
+					foreach p of numlist 1/19 {
+						foreach r of numlist 1/`=`rep'' {
+							gen cens_c_`w'_`k'_s`s'_p`p'_r`r'=c_`w'_s`s'_p`p'_r`r'
+							replace cens_c_`w'_`k'_s`s'_p`p'_r`r'=0 if poor_`w'_`k'_s`s'_p`p'_r`r'==0
+						}
+					}
+				}
+			}
+		}
+
+		* adjusted poverty headcount ratio = the societal poverty measure of interest
+		foreach k of local cutoff {
+			local j=0
+			foreach w in exo freq pca {
+				local j=`j'+1
+				foreach s of local sim { // simulated indicator
+					foreach p of numlist 1/19 {
+						foreach r of numlist 1/`=`rep'' {
+							sum cens_c_`w'_`k'_s`s'_p`p'_r`r'
+							mat B=(`p',`s',`k',`j',r(mean),`r')
+							mat R=R\B
+						}
+					}
+				}
+			}
+		}
+		
+		svmat R, names(col)
+		keep if k!=.
+		keep sim_port sim_ind k w_method mpi rep
+		label val w_method method
+		gen mc=`x'
+		append using "$path/temp_k`cutoff'"
+		save "$path/temp_k`cutoff'", replace
+}
+e
+
+*******************************************
+*Graph Creation
+*******************************************
+	
+	clear all
+	set maxvar 120000 
+	set matsize 11000 
+	
+	global path "/Users/ricardonogales/Dropbox/Endogenous Weights/Datasets and dofiles/"
+	set scheme s1color
+	
+	local cutoff 50
+	use "$path/temp_k`cutoff'"
+	drop a // only to initialize
+	gen aux=sim_port+1
+	drop sim_port 
+	ren aux sim_port
+	gen mpi_next=.
+	forvalues s=0/19 {
+		bys rep mc sim_ind k w_method: gen pair=. if sim_port==`s'
+		bys rep mc sim_ind k w_method: replace pair=mpi if sim_port==`s'+1
+		bys rep mc sim_ind k w_method: egen aux=max(pair)
+		bys rep mc sim_ind k w_method: replace mpi_next=aux if sim_port==`s'
+		drop aux pair
+	}
+	sort rep mc sim_ind k w_method sim_port
+	gen viol=(mpi_next-mpi<0)
+	
+	
+	* Bar graph
+	preserve
+		collapse viol, by(sim_port sim_ind w_method)
+		foreach i of numlist 1/4 {
+			foreach m of numlist 1 2 3 {
+				twoway bar viol sim_port if sim_ind==`i' & w_method==`m', ///
+					name(g_`m'_s`i', replace) title("`: label (w_method) `m'', Indicator `i'") nodraw xlabel(1(2)19) ylabel(#10,grid angle(h) format(%9.2g)) ///
+					legend(order(1 "Proportion of violations of Monotonicity")) ytitle(%) xtitle(Ventile)
+			}
+		}
+		grc1leg g_1_s1 g_1_s2 g_1_s3 g_1_s4 ///
+				  g_2_s1 g_2_s2 g_2_s3 g_2_s4 ///
+				  g_3_s1 g_3_s2 g_3_s3 g_3_s4 ///
+					, row(3) col(4) name(g_`k', replace) ycommon // title("Poverty cutoff: k=0.`cutoff'")
+		graph export "$path/graphs and tables/sim_mon_v3_k`cutoff'.png", replace
+	restore
+	
+	* line graph 
+	preserve
+		gen mean_mpi=.
+		keep if mc==9
+		foreach i of numlist 1 2 3 4  {
+			foreach m of numlist 1 2 3 {
+				forvalues s=2/20 {
+					mean mpi if sim_ind==`i' & w_method==`m' & sim_port==`s'
+					mat A=e(b)
+					replace mean_mpi=A[1,1] if sim_ind==`i' & w_method==`m' & sim_port==`s'
+				}
+			}
+		}
+		foreach m of numlist 1 2 3 {
+			mean mpi if sim_ind==. & w_method==`m' 
+			mat A=e(b)
+			replace mean_mpi=A[1,1] if sim_ind==. & w_method==`m'
+		}
+		drop mpi mpi_next viol 
+		rename mean_mpi mpi
+		
+		bys sim_ind w_method sim_port: gen tag=_n
+		keep if tag==1
+		gen mpi_next=.
+		forvalues s=0/19 {
+			bys sim_ind k w_method: gen pair=. if sim_port==`s'
+			bys sim_ind k w_method: replace pair=mpi if sim_port==`s'+1
+			bys sim_ind k w_method: egen aux=max(pair)
+			bys sim_ind k w_method: replace mpi_next=aux if sim_port==`s'
+			drop aux pair
+		}
+		sort sim_ind k w_method sim_port
+		gen viol=(mpi_next-mpi<0)
+		gen bar=mpi_next if viol==1
+		gen s_bar=sim_port+1 if viol==1
+		
+		foreach i of numlist 1/4 {
+			foreach m of numlist 1 2 3 {
+				twoway (scatter mpi sim_port if w_method==`m' & sim_ind==`i', ylabel(,angle(h) format(%9.2g)) connect(l) mcolor(maroon) lcolor(maroon)) ///
+							(bar bar s_bar if w_method==`m' & sim_ind==`i', color(gray%30) barw(1)), ///
+							name(g_`m'_s`i', replace) ytitle(P) title("`: label (w_method) `m'', Indicator `i'") nodraw legend(order(1 "Mean point estimate" 2 "Violations of Monotonicity")) 
+			}
+		}
+		grc1leg g_1_s1 g_1_s2 g_1_s3 g_1_s4 ///
+				g_2_s1 g_2_s2 g_2_s3 g_2_s4 ///
+				g_3_s1 g_3_s2 g_3_s3 g_3_s4 ///
+					, row(3) col(4) name(g_`k', replace) // title("Poverty cutoff: k=0.`cutoff'")
+			graph export "$path/graphs and tables/sim_mon_example_v3_k`cutoff'.png", replace
+	restore
+	
+
+
+			
